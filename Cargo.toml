@@ -3,9 +3,12 @@ name = "attractor-server"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "HTTP server for the Attractor DOT-based AI pipeline runner"
+description = "HTTP server for the attractor DOT-based AI pipeline runner"
 license = "MIT"
 repository = "https://github.com/bkrabach/attractor-server"
+readme = "README.md"
+keywords = ["pipeline", "server", "http", "ai", "llm"]
+categories = ["development-tools", "web-programming::http-server"]
 
 [[bin]]
 name = "attractor-server"

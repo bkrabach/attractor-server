@@ -29,8 +29,8 @@ pub use state::{AppState as State, PipelineStatus};
 
 use std::path::PathBuf;
 
-use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
+use axum::{Router, http::HeaderValue};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::state::AppState;
 
@@ -80,6 +80,11 @@ impl Default for ServerConfig {
 /// The returned router is fully stateful (`Router<()>`) — it can be handed
 /// directly to [`axum::serve`].
 ///
+/// `cors_origins` controls the CORS policy:
+/// - Empty vec → allow all origins (`*`) via [`AllowOrigin::any()`].
+/// - Non-empty → allow only the listed origins; each request's `Origin` header
+///   is reflected back when it matches, otherwise the CORS headers are absent.
+///
 /// Routes wired:
 /// - `POST   /pipelines`
 /// - `GET    /pipelines/{id}`
@@ -90,11 +95,19 @@ impl Default for ServerConfig {
 /// - `GET    /pipelines/{id}/graph`
 /// - `GET    /pipelines/{id}/checkpoint`
 /// - `GET    /pipelines/{id}/context`
-pub fn create_router(state: AppState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+pub fn create_router(state: AppState, cors_origins: Vec<String>) -> Router {
+    let cors = if cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        let parsed: Vec<HeaderValue> = cors_origins.iter().filter_map(|s| s.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(parsed))
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
     routes::router().with_state(state).layer(cors)
 }
@@ -106,10 +119,10 @@ pub fn create_router(state: AppState) -> Router {
 /// Create a fully-configured axum [`Router`] from a [`ServerConfig`].
 ///
 /// Builds an [`AppState`] backed by `config.data_dir`, then delegates to
-/// [`create_router`].
+/// [`create_router`] with the CORS origins from the config.
 pub fn create_service(config: &ServerConfig) -> Router {
     let state = AppState::new(config.data_dir.clone());
-    create_router(state)
+    create_router(state, config.cors_origins.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +224,7 @@ mod tests {
         ];
 
         for (method, path) in id_routes {
-            let app = create_router(AppState::with_temp_dir());
+            let app = create_router(AppState::with_temp_dir(), vec![]);
             let resp = app
                 .oneshot(
                     Request::builder()
@@ -246,7 +259,7 @@ mod tests {
         }
 
         // --- POST /pipelines — invalid (empty) body → 422/400, not 404 ---
-        let app = create_router(AppState::with_temp_dir());
+        let app = create_router(AppState::with_temp_dir(), vec![]);
         let resp = post_json(app, "/pipelines", serde_json::json!({})).await;
         assert_ne!(
             resp.status(),
@@ -255,7 +268,7 @@ mod tests {
         );
 
         // --- POST /pipelines/{id}/questions/{qid}/answer ---
-        let app = create_router(AppState::with_temp_dir());
+        let app = create_router(AppState::with_temp_dir(), vec![]);
         let resp = post_json(
             app,
             &format!("/pipelines/{fake_id}/questions/{fake_qid}/answer"),
@@ -277,7 +290,7 @@ mod tests {
     // ---------------------------------------------------------------------------
     #[tokio::test]
     async fn cors_headers_present() {
-        let app = create_router(AppState::with_temp_dir());
+        let app = create_router(AppState::with_temp_dir(), vec![]);
         let resp = options_req(app, "/pipelines").await;
 
         let headers = resp.headers();
@@ -318,6 +331,53 @@ mod tests {
         assert_eq!(
             json["error"]["code"], "PIPELINE_NOT_FOUND",
             "create_service router must return PIPELINE_NOT_FOUND; got: {json}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 4: cors_specific_origin_reflected (SRV-FIX-001)
+    //
+    // When ServerConfig.cors_origins contains specific origins, create_service
+    // must configure CORS to reflect those origins rather than using the wildcard
+    // AllowOrigin::Any.  A preflight OPTIONS request from a listed origin should
+    // receive that exact origin in Access-Control-Allow-Origin (not "*").
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn cors_specific_origin_reflected() {
+        let config = ServerConfig {
+            cors_origins: vec!["https://myapp.example.com".to_string()],
+            data_dir: std::env::temp_dir().join(format!("attractor-test-{}", uuid::Uuid::new_v4())),
+            ..ServerConfig::default()
+        };
+
+        let app = create_service(&config);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/pipelines")
+                    .header("origin", "https://myapp.example.com")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let acao = resp
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap_or(""))
+            .unwrap_or("");
+
+        // With specific origins wired, the reflected value must be the exact
+        // origin, NOT the wildcard "*" produced by AllowOrigin::Any.
+        assert_eq!(
+            acao, "https://myapp.example.com",
+            "listed origin must be reflected in ACAO header; got: {:?}",
+            acao
         );
     }
 }

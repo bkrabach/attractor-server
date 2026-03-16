@@ -28,7 +28,7 @@ use attractor_server::state::AppState;
 /// the OS reclaims it.  Sufficient for tests that don't inspect the filesystem.
 fn test_app() -> Router {
     let state = AppState::with_temp_dir();
-    create_router(state)
+    create_router(state, vec![])
 }
 
 /// Build a test app whose temp directory is kept alive for the duration of the
@@ -38,7 +38,7 @@ fn test_app() -> Router {
 fn persistent_app() -> (Router, TempDir) {
     let dir = TempDir::new().expect("create temp dir");
     let state = AppState::new(dir.path().to_path_buf());
-    let app = create_router(state);
+    let app = create_router(state, vec![]);
     (app, dir)
 }
 

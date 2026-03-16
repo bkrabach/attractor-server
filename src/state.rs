@@ -68,12 +68,16 @@ impl PipelineInner {
 
     /// Append `event` to the log.
     ///
-    /// Once the log reaches [`EVENT_LOG_CAPACITY`] entries, additional events
-    /// are silently dropped to prevent unbounded memory growth.
+    /// Once the log reaches [`EVENT_LOG_CAPACITY`] entries, the **oldest**
+    /// event is evicted (drained from the front) before the new event is
+    /// appended.  This ensures that the most-recent events are always
+    /// retained and late-joining SSE subscribers get an up-to-date history.
     pub fn push_event(&mut self, event: PipelineEvent) {
-        if self.event_log.len() < EVENT_LOG_CAPACITY {
-            self.event_log.push(event);
+        if self.event_log.len() >= EVENT_LOG_CAPACITY {
+            // Drop the oldest entry to make room for the new one.
+            self.event_log.drain(0..1);
         }
+        self.event_log.push(event);
     }
 }
 
@@ -304,5 +308,57 @@ mod tests {
         let state = AppState::new(data_dir.clone());
         let logs_root = state.logs_root_for("pipe-xyz");
         assert_eq!(logs_root, data_dir.join("logs").join("pipe-xyz"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 7: event_log_eviction_drops_oldest_not_newest (SRV-FIX-003)
+    //
+    // When the event log is at capacity and a new event arrives, the OLDEST
+    // event must be evicted so the newest event is retained.  Before the fix,
+    // push_event silently drops the incoming event; after the fix the oldest
+    // entry is removed and the new event is appended.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn event_log_eviction_drops_oldest_not_newest() {
+        let mut inner = PipelineInner::new();
+
+        // Fill the log to capacity with "old" events.
+        let old_event = PipelineEvent::PipelineStarted {
+            name: "old".to_string(),
+            id: "old".to_string(),
+        };
+        for _ in 0..EVENT_LOG_CAPACITY {
+            inner.push_event(old_event.clone());
+        }
+
+        // Push one "new" event — this is the one that must be retained.
+        let new_event = PipelineEvent::PipelineStarted {
+            name: "new".to_string(),
+            id: "new".to_string(),
+        };
+        inner.push_event(new_event);
+
+        // Cap must still be respected.
+        assert_eq!(
+            inner.event_log.len(),
+            EVENT_LOG_CAPACITY,
+            "event_log must stay at capacity after eviction"
+        );
+
+        // The LAST entry must be the newly-pushed "new" event (not dropped).
+        let last = &inner.event_log[inner.event_log.len() - 1];
+        assert!(
+            matches!(last, PipelineEvent::PipelineStarted { id, .. } if id == "new"),
+            "newest event must be retained after eviction; got: {:?}",
+            last
+        );
+
+        // The FIRST entry must be an "old" event (oldest was dropped, not the newest).
+        let first = &inner.event_log[0];
+        assert!(
+            matches!(first, PipelineEvent::PipelineStarted { id, .. } if id == "old"),
+            "first remaining entry must be 'old' (oldest of the old batch); got: {:?}",
+            first
+        );
     }
 }

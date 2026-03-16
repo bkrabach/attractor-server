@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use attractor_server::{ServerConfig, create_service};
+use attractor_server::{create_router, state::AppState};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -87,14 +87,28 @@ async fn main() {
     let cors_origins = parse_cors_origins(&cli.cors_origins);
     let data_dir = resolve_data_dir(cli.data_dir);
 
-    let config = ServerConfig {
-        host: cli.host.clone(),
-        port: cli.port,
-        cors_origins,
-        data_dir,
-    };
+    // Create AppState directly so we can pre-load a pipeline before the router
+    // is assembled (required for single-pipeline mode via --file).
+    let state = AppState::new(data_dir);
 
-    let app = create_service(&config);
+    // Single-pipeline mode: pre-load the DOT file into AppState now so it is
+    // available immediately when the server starts accepting requests.
+    if let Some(ref file_path) = cli.file {
+        tracing::info!(
+            file = %file_path.display(),
+            "single-pipeline mode: loading DOT file"
+        );
+        preload_pipeline_from_file(&state, file_path)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to pre-load pipeline from {}: {e:?}",
+                    file_path.display()
+                )
+            });
+    }
+
+    let app = create_router(state, cors_origins);
 
     let bind_addr = format!("{}:{}", cli.host, cli.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -103,16 +117,7 @@ async fn main() {
 
     let local_addr = listener.local_addr().expect("local_addr");
 
-    if let Some(ref file_path) = cli.file {
-        // Single-pipeline mode — server is seeded from a pre-existing DOT file.
-        tracing::info!(
-            file = %file_path.display(),
-            "single-pipeline mode: loading DOT file"
-        );
-        // Validate the DOT file is readable at startup; fail fast before accepting traffic.
-        let _ = tokio::fs::read_to_string(file_path)
-            .await
-            .unwrap_or_else(|e| panic!("failed to read DOT file {}: {e}", file_path.display()));
+    if cli.file.is_some() {
         tracing::info!(addr = %local_addr, "attractor-server listening (single-pipeline mode)");
     } else {
         // Persistent server mode — accepts arbitrary pipelines via the API.
@@ -120,6 +125,29 @@ async fn main() {
     }
 
     axum::serve(listener, app).await.expect("server error");
+}
+
+// ---------------------------------------------------------------------------
+// Pre-load helper (public so tests can call it directly)
+// ---------------------------------------------------------------------------
+
+/// Read a DOT file from `file_path`, parse and validate it, then spawn it as
+/// a running pipeline inside `state`.
+///
+/// Returns the new pipeline ID on success.  On I/O error the function returns
+/// `Err(ServerError::Internal(...))` so the caller can decide whether to
+/// panic (startup) or surface the error via HTTP (future use).
+pub async fn preload_pipeline_from_file(
+    state: &AppState,
+    file_path: &std::path::Path,
+) -> Result<String, attractor_server::ServerError> {
+    let dot = tokio::fs::read_to_string(file_path).await.map_err(|e| {
+        attractor_server::ServerError::Internal(format!(
+            "failed to read DOT file {}: {e}",
+            file_path.display()
+        ))
+    })?;
+    attractor_server::routes::spawn_pipeline(state, dot, std::collections::HashMap::new()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -221,5 +249,40 @@ mod tests {
         let cli = Cli::try_parse_from(["attractor-server", "--data-dir", "/custom/path"]).unwrap();
         let data_dir = resolve_data_dir(cli.data_dir);
         assert_eq!(data_dir, PathBuf::from("/custom/path"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // SRV-FIX-002: preload_pipeline_from_file submits pipeline to state
+    //
+    // When a DOT file is passed to preload_pipeline_from_file(), the resulting
+    // pipeline must appear in the AppState so the server starts in
+    // single-pipeline mode with the pipeline already running.
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn file_preload_submits_pipeline_to_state() {
+        let dot =
+            "digraph test {\n  start [shape=Mdiamond]\n  exit  [shape=Msquare]\n  start -> exit\n}";
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("attractor-preload-test-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .expect("create temp dir");
+
+        let file_path = tmp_dir.join("pipeline.dot");
+        tokio::fs::write(&file_path, dot)
+            .await
+            .expect("write dot file");
+
+        let state = attractor_server::state::AppState::new(tmp_dir.clone());
+        preload_pipeline_from_file(&state, &file_path)
+            .await
+            .expect("preload should succeed");
+
+        let count = state.pipelines.read().await.len();
+        assert_eq!(
+            count, 1,
+            "preloaded pipeline must appear in AppState; got {count}"
+        );
     }
 }

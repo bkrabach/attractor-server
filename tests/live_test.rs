@@ -40,7 +40,7 @@ fn is_live_test() -> bool {
 fn live_app() -> (Router, TempDir) {
     let dir = TempDir::new().expect("create temp dir");
     let state = AppState::new(dir.path().to_path_buf());
-    let app = create_router(state);
+    let app = create_router(state, vec![]);
     (app, dir)
 }
 

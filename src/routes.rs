@@ -167,13 +167,18 @@ pub fn router() -> Router<AppState> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /pipelines` — parse, validate, spawn, and return `{id, status: running}`.
-pub async fn create_pipeline(
-    State(state): State<AppState>,
-    Json(req): Json<CreatePipelineRequest>,
-) -> Result<Json<CreatePipelineResponse>, ServerError> {
+/// Core pipeline creation logic — parse, validate, spawn tasks, insert into state.
+///
+/// Returns the new pipeline ID on success.  Extracted from the HTTP handler so
+/// it can be called directly from `main.rs` when pre-loading a `--file`
+/// pipeline at server start-up.
+pub async fn spawn_pipeline(
+    state: &AppState,
+    dot: String,
+    _context: HashMap<String, Value>,
+) -> Result<String, ServerError> {
     // 1. Parse DOT source.
-    let graph = parse_dot(&req.dot).map_err(|e| ServerError::ParseError(e.to_string()))?;
+    let graph = parse_dot(&dot).map_err(|e| ServerError::ParseError(e.to_string()))?;
 
     // 2. Validate — filter to Error-severity diagnostics only.
     let diags = validate(&graph, &[]);
@@ -253,7 +258,7 @@ pub async fn create_pipeline(
     }
 
     // 8. Spawn pipeline execution task.
-    let dot_source = req.dot.clone();
+    let dot_source = dot.clone();
     let inner_exec = inner.clone();
     let logs_root_exec = logs_root.clone();
     let join_handle = tokio::spawn(async move {
@@ -273,7 +278,7 @@ pub async fn create_pipeline(
     // 9. Create PipelineHandle with Arc<Mutex<PipelineInner>>.
     let handle = Arc::new(PipelineHandle {
         id: pipeline_id.clone(),
-        dot_source: req.dot,
+        dot_source: dot,
         graph,
         event_tx,
         interviewer_state,
@@ -286,6 +291,15 @@ pub async fn create_pipeline(
     // 10. Store in AppState and return.
     state.insert_pipeline(handle).await;
 
+    Ok(pipeline_id)
+}
+
+/// `POST /pipelines` — parse, validate, spawn, and return `{id, status: running}`.
+pub async fn create_pipeline(
+    State(state): State<AppState>,
+    Json(req): Json<CreatePipelineRequest>,
+) -> Result<Json<CreatePipelineResponse>, ServerError> {
+    let pipeline_id = spawn_pipeline(&state, req.dot, req.context).await?;
     Ok(Json(CreatePipelineResponse {
         id: pipeline_id,
         status: PipelineStatus::Running,
