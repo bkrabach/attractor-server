@@ -20,6 +20,7 @@ path = "src/lib.rs"
 
 [dependencies]
 attractor          = { git = "https://github.com/bkrabach/attractor.git" }
+unified-llm       = { git = "https://github.com/bkrabach/unified-llm.git" }
 axum               = { version = "0.8" }
 tower              = { version = "0.5", features = ["util"] }
 tower-http         = { version = "0.6", features = ["cors", "trace"] }
