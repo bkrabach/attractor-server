@@ -149,6 +149,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "unified-llm",
  "uuid",
 ]
 

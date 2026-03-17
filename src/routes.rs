@@ -1,6 +1,7 @@
 //! HTTP route handlers for pipeline lifecycle management.
 //!
 //! Exposes endpoints:
+//! - `GET  /pipelines`                              — list all pipeline runs
 //! - `POST /pipelines`                              — create and launch a pipeline run
 //! - `GET  /pipelines/{id}`                         — query the status of a pipeline
 //! - `POST /pipelines/{id}/cancel`                  — abort a running pipeline
@@ -32,8 +33,11 @@ use uuid::Uuid;
 
 use attractor::{
     Answer, AnswerValue, Checkpoint, Interviewer, PipelineEvent, PipelineRunner, QuestionOption,
-    QuestionType, engine::RunConfig, parse_dot, validate, validation::Severity,
+    QuestionType, engine::RunConfig, handler::CodergenHandler, parse_dot, validate,
+    validation::Severity,
 };
+
+use crate::backends::LlmCodergenBackend;
 
 use crate::error::ServerError;
 use crate::interviewer::{HttpInterviewer, InterviewerState};
@@ -64,6 +68,25 @@ pub struct CreatePipelineResponse {
 /// Response body for `GET /pipelines/{id}`.
 #[derive(Debug, Serialize)]
 pub struct PipelineStatusResponse {
+    /// Pipeline run identifier.
+    pub id: String,
+    /// Current lifecycle status.
+    pub status: PipelineStatus,
+    /// When the pipeline was spawned.
+    pub started_at: DateTime<Utc>,
+    /// Node IDs that have completed (in order).
+    pub completed_nodes: Vec<String>,
+    /// The node currently being executed, if any.
+    pub current_node: Option<String>,
+}
+
+/// Response body for `GET /pipelines` (list all pipelines).
+///
+/// Intentionally structurally identical to [`PipelineStatusResponse`]: keeping
+/// them as distinct named types preserves independent versioning — either can
+/// gain or drop fields without affecting the other endpoint's contract.
+#[derive(Debug, Serialize)]
+pub struct PipelineSummary {
     /// Pipeline run identifier.
     pub id: String,
     /// Current lifecycle status.
@@ -152,7 +175,7 @@ pub struct GraphResponse {
 /// Mount this onto your Axum application with `.with_state(app_state)`.
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/pipelines", post(create_pipeline))
+        .route("/pipelines", post(create_pipeline).get(list_pipelines))
         .route("/pipelines/{id}", get(get_pipeline))
         .route("/pipelines/{id}/cancel", post(cancel_pipeline))
         .route("/pipelines/{id}/questions", get(get_questions))
@@ -197,9 +220,19 @@ pub async fn spawn_pipeline(
     let interviewer_state = Arc::new(InterviewerState::new());
     let interviewer = Arc::new(HttpInterviewer::new(interviewer_state.clone()));
 
-    // 5. Build PipelineRunner with the HttpInterviewer.
+    // 5. Build PipelineRunner with the HttpInterviewer and real LLM backend.
+    //
+    // SRV-BUG-001: wire up LlmCodergenBackend so codergen nodes call the LLM
+    // instead of returning simulated responses.  If no API credentials are
+    // available in the environment, from_env() logs a warning and returns None,
+    // and CodergenHandler falls back to simulation mode gracefully.
+    let codergen_backend: Option<Box<dyn attractor::handler::CodergenBackend>> =
+        LlmCodergenBackend::from_env("gpt-4o").map(|b| Box::new(b) as _);
+    let codergen_handler = Arc::new(CodergenHandler::new(codergen_backend));
+
     let (runner, runner_rx) = PipelineRunner::builder()
         .with_interviewer(interviewer as Arc<dyn Interviewer>)
+        .with_handler("codergen", codergen_handler)
         .build();
 
     // 6. Create broadcast channel (capacity 10,000) for external event streaming.
@@ -292,6 +325,27 @@ pub async fn spawn_pipeline(
     state.insert_pipeline(handle).await;
 
     Ok(pipeline_id)
+}
+
+/// `GET /pipelines` — return a summary of all known pipeline runs.
+pub async fn list_pipelines(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PipelineSummary>>, ServerError> {
+    let pipelines = state.pipelines.read().await;
+    let mut summaries = Vec::new();
+    for handle in pipelines.values() {
+        let inner = handle.inner.lock().await;
+        summaries.push(PipelineSummary {
+            id: handle.id.clone(),
+            status: inner.status.clone(),
+            started_at: handle.started_at,
+            completed_nodes: inner.completed_nodes.clone(),
+            current_node: inner.current_node.clone(),
+        });
+    }
+    // Sort by creation time for stable, deterministic ordering across calls.
+    summaries.sort_by_key(|s| s.started_at);
+    Ok(Json(summaries))
 }
 
 /// `POST /pipelines` — parse, validate, spawn, and return `{id, status: running}`.
@@ -995,6 +1049,62 @@ mod tests {
             content_type.contains("text/event-stream"),
             "content-type must be text/event-stream; got: {content_type}"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: list_pipelines_returns_array
+    //
+    // POST /pipelines twice, then GET /pipelines must return 200 with a JSON
+    // array of length 2 where each entry has id, status, and started_at fields.
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn list_pipelines_returns_array() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state);
+
+        // Create two pipelines.
+        let resp1 = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(resp1.status(), StatusCode::OK, "first POST must return 200");
+
+        let resp2 = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(
+            resp2.status(),
+            StatusCode::OK,
+            "second POST must return 200"
+        );
+
+        // GET /pipelines — must return 200 with a JSON array of length 2.
+        let resp = get_req(app, "/pipelines").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "GET /pipelines must return 200"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json.is_array(),
+            "GET /pipelines must return a JSON array; got: {json}"
+        );
+        let arr = json.as_array().unwrap();
+        assert_eq!(
+            arr.len(),
+            2,
+            "GET /pipelines must return 2 pipelines; got: {arr:?}"
+        );
+        for entry in arr {
+            assert!(
+                entry["id"].as_str().is_some(),
+                "each pipeline entry must have an `id` string; got: {entry}"
+            );
+            assert!(
+                entry["status"].as_str().is_some(),
+                "each pipeline entry must have a `status` string; got: {entry}"
+            );
+            assert!(
+                entry["started_at"].as_str().is_some(),
+                "each pipeline entry must have a `started_at` string; got: {entry}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@
 //! - [`create_service`] — create an [`AppState`] from [`ServerConfig`] and call [`create_router`].
 //! - [`ServerConfig`] — server configuration (host, port, CORS origins, data directory).
 
+pub mod backends;
 pub mod error;
 pub mod interviewer;
 pub mod routes;
