@@ -62,7 +62,7 @@ impl CodergenBackend for LlmCodergenBackend {
         &self,
         node: &Node,
         prompt: &str,
-        ctx: &Context,
+        _ctx: &Context,
     ) -> Result<CodergenResult, EngineError> {
         // Honour the per-node model if the stylesheet/DOT set one.
         let model = if !node.llm_model.is_empty() {
@@ -71,12 +71,7 @@ impl CodergenBackend for LlmCodergenBackend {
             self.default_model.clone()
         };
 
-        // Prepend any accumulated pipeline context so the LLM has awareness
-        // of prior stages, human feedback, and previous step output.
-        let context_prefix = build_context_prefix(ctx);
-        let full_prompt = format!("{}{}", context_prefix, prompt);
-
-        let mut params = GenerateParams::new(model, &full_prompt);
+        let mut params = GenerateParams::new(model, prompt);
         params.client = Some(self.client.clone());
 
         // Route to the node's explicit provider when specified.
@@ -92,39 +87,6 @@ impl CodergenBackend for LlmCodergenBackend {
         })?;
 
         Ok(CodergenResult::Text(result.text))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Build a context prefix string to prepend to LLM prompts.
-///
-/// Reads the three pipeline-context keys that most affect what the next LLM
-/// call should know:
-///
-/// - `human.gate.response` — operator feedback from the last human gate
-/// - `last_response`       — truncated output of the previous codergen stage
-/// - `last_stage`          — node id of the previous stage
-///
-/// Returns an empty string when none of the keys are set (first stage, no
-/// context accumulated yet), so the raw prompt is passed through unchanged.
-fn build_context_prefix(ctx: &Context) -> String {
-    let mut sections = Vec::new();
-    if let Some(val) = ctx.get("human.gate.response") {
-        sections.push(format!("Human feedback: {}", val.to_string_repr()));
-    }
-    if let Some(val) = ctx.get("last_response") {
-        sections.push(format!("Previous step output: {}", val.to_string_repr()));
-    }
-    if let Some(val) = ctx.get("last_stage") {
-        sections.push(format!("Previous step: {}", val.to_string_repr()));
-    }
-    if sections.is_empty() {
-        String::new()
-    } else {
-        format!("[Pipeline Context]\n{}\n\n", sections.join("\n"))
     }
 }
 
@@ -251,42 +213,5 @@ mod tests {
     #[test]
     fn llm_codergen_backend_struct_is_accessible() {
         let _ = std::any::TypeId::of::<LlmCodergenBackend>();
-    }
-
-    #[test]
-    fn context_prefix_injected_when_human_response_present() {
-        use attractor::graph::Value;
-        let ctx = Context::new();
-        ctx.set("human.gate.response", Value::Str("option B".to_string()));
-        let prefix = build_context_prefix(&ctx);
-        assert!(
-            prefix.starts_with("[Pipeline Context]"),
-            "prefix must start with header"
-        );
-        assert!(prefix.contains("Human feedback: option B"));
-    }
-
-    #[test]
-    fn no_prefix_when_context_empty() {
-        let ctx = Context::new();
-        let prefix = build_context_prefix(&ctx);
-        assert!(prefix.is_empty(), "empty context must produce no prefix");
-    }
-
-    #[test]
-    fn all_three_keys_produce_full_prefix() {
-        use attractor::graph::Value;
-        let ctx = Context::new();
-        ctx.set("human.gate.response", Value::Str("approve".to_string()));
-        ctx.set("last_response", Value::Str("generated code".to_string()));
-        ctx.set("last_stage", Value::Str("codegen".to_string()));
-        let prefix = build_context_prefix(&ctx);
-        assert!(
-            prefix.starts_with("[Pipeline Context]"),
-            "prefix must start with header"
-        );
-        assert!(prefix.contains("Human feedback: approve"));
-        assert!(prefix.contains("Previous step output: generated code"));
-        assert!(prefix.contains("Previous step: codegen"));
     }
 }
