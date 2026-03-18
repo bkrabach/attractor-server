@@ -110,21 +110,23 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "attractor"
 version = "0.1.0"
-source = "git+https://github.com/bkrabach/attractor.git#7cdeded263f3eb0090b1619878bc8e374c673b09"
 dependencies = [
  "async-trait",
  "chrono",
+ "clap",
  "coding-agent-loop",
  "futures",
  "indexmap",
  "nom",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
- "unified-llm",
+ "tracing-subscriber",
+ "unified-llm 0.1.0 (git+https://github.com/bkrabach/unified-llm.git)",
  "uuid",
 ]
 
@@ -135,21 +137,30 @@ dependencies = [
  "async-trait",
  "attractor",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures",
+ "globset",
  "http-body-util",
+ "indexmap",
+ "nom",
+ "rand",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "unified-llm",
+ "unified-llm 0.1.0",
  "uuid",
 ]
 
@@ -374,7 +385,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "unified-llm",
+ "unified-llm 0.1.0 (git+https://github.com/bkrabach/unified-llm.git)",
  "uuid",
 ]
 
@@ -1979,6 +1990,26 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unified-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "jsonschema",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "unified-llm"

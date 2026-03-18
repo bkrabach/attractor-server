@@ -170,6 +170,13 @@ pub struct GraphResponse {
 // Router
 // ---------------------------------------------------------------------------
 
+/// Response body for `GET /pipelines/{id}/nodes/{node_id}/response`.
+#[derive(Debug, Serialize)]
+pub struct NodeResponseResult {
+    /// The content of `response.md` for this node, or `null` if not yet written.
+    pub content: Option<String>,
+}
+
 /// Build the pipeline lifecycle router.
 ///
 /// Mount this onto your Axum application with `.with_state(app_state)`.
@@ -184,6 +191,10 @@ pub fn router() -> Router<AppState> {
         .route("/pipelines/{id}/checkpoint", get(get_checkpoint))
         .route("/pipelines/{id}/context", get(get_context))
         .route("/pipelines/{id}/events", get(get_events))
+        .route(
+            "/pipelines/{id}/nodes/{node_id}/response",
+            get(get_node_response),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +727,36 @@ pub async fn get_context(
     Ok(Json(context_json))
 }
 
+/// `GET /pipelines/{id}/nodes/{node_id}/response` — return the LLM response
+/// artifact for a specific node.
+///
+/// Reads `{logs_root}/{node_id}/response.md` and returns its content.
+/// Returns `{"content": null}` when the file has not yet been written
+/// (node not yet started, or node is not a codergen node).
+pub async fn get_node_response(
+    State(state): State<AppState>,
+    Path((id, node_id)): Path<(String, String)>,
+) -> Result<Json<NodeResponseResult>, ServerError> {
+    let handle = state
+        .get_pipeline(&id)
+        .await
+        .ok_or_else(|| ServerError::PipelineNotFound(id.clone()))?;
+
+    let response_path = handle.logs_root.join(&node_id).join("response.md");
+
+    if !response_path.exists() {
+        return Ok(Json(NodeResponseResult { content: None }));
+    }
+
+    let content = tokio::fs::read_to_string(&response_path)
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+
+    Ok(Json(NodeResponseResult {
+        content: Some(content),
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Tests — RED written first, then GREEN implemented above
 // ---------------------------------------------------------------------------
@@ -1153,6 +1194,71 @@ mod tests {
         assert!(
             status == "running" || status == "completed",
             "status must be running or completed shortly after creation; got: {status}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: get_node_response_returns_null_when_not_written (UI-FEAT-012)
+    //
+    // GET /pipelines/{id}/nodes/{node_id}/response must return 200 with
+    // `{"content": null}` when no response.md exists for the node yet.
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn get_node_response_returns_null_when_not_written() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state);
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/nodes/SomeNode/response")).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "must return 200 even when response.md absent"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["content"].is_null(),
+            "content must be null when response.md has not been written; got: {json}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: get_node_response_returns_content_when_written (UI-FEAT-012)
+    //
+    // GET /pipelines/{id}/nodes/{node_id}/response must return the content of
+    // {logs_root}/{node_id}/response.md when it exists.
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn get_node_response_returns_content_when_written() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state.clone());
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        // Write a fake response.md into the node's log directory.
+        let logs_root = state.logs_root_for(&id);
+        let node_dir = logs_root.join("ExploreIdea");
+        std::fs::create_dir_all(&node_dir).expect("create node dir");
+        std::fs::write(
+            node_dir.join("response.md"),
+            "The LLM responded with this text.",
+        )
+        .unwrap();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/nodes/ExploreIdea/response")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["content"].as_str(),
+            Some("The LLM responded with this text."),
+            "content must be the text from response.md; got: {json}"
         );
     }
 }

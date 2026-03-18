@@ -62,7 +62,7 @@ impl CodergenBackend for LlmCodergenBackend {
         &self,
         node: &Node,
         prompt: &str,
-        _ctx: &Context,
+        ctx: &Context,
     ) -> Result<CodergenResult, EngineError> {
         // Honour the per-node model if the stylesheet/DOT set one.
         let model = if !node.llm_model.is_empty() {
@@ -71,7 +71,12 @@ impl CodergenBackend for LlmCodergenBackend {
             self.default_model.clone()
         };
 
-        let mut params = GenerateParams::new(model, prompt);
+        // Prepend any accumulated pipeline context so the LLM has awareness
+        // of prior stages, human feedback, and previous step output.
+        let context_prefix = build_context_prefix(ctx);
+        let full_prompt = format!("{}{}", context_prefix, prompt);
+
+        let mut params = GenerateParams::new(model, &full_prompt);
         params.client = Some(self.client.clone());
 
         // Route to the node's explicit provider when specified.
@@ -87,6 +92,39 @@ impl CodergenBackend for LlmCodergenBackend {
         })?;
 
         Ok(CodergenResult::Text(result.text))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Build a context prefix string to prepend to LLM prompts.
+///
+/// Reads the three pipeline-context keys that most affect what the next LLM
+/// call should know:
+///
+/// - `human.gate.response` — operator feedback from the last human gate
+/// - `last_response`       — truncated output of the previous codergen stage
+/// - `last_stage`          — node id of the previous stage
+///
+/// Returns an empty string when none of the keys are set (first stage, no
+/// context accumulated yet), so the raw prompt is passed through unchanged.
+fn build_context_prefix(ctx: &Context) -> String {
+    let mut sections = Vec::new();
+    if let Some(val) = ctx.get("human.gate.response") {
+        sections.push(format!("Human feedback: {}", val.to_string_repr()));
+    }
+    if let Some(val) = ctx.get("last_response") {
+        sections.push(format!("Previous step output: {}", val.to_string_repr()));
+    }
+    if let Some(val) = ctx.get("last_stage") {
+        sections.push(format!("Previous step: {}", val.to_string_repr()));
+    }
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("[Pipeline Context]\n{}\n\n", sections.join("\n"))
     }
 }
 
@@ -173,14 +211,15 @@ mod tests {
         assert_eq!(params.model, "gpt-4o");
     }
 
-    /// Verify LlmCodergenBackend::from_env() returns None when no API keys
-    /// are set (standard in CI). This ensures graceful degradation rather
-    /// than panics.
+    /// Verify LlmCodergenBackend::from_env() never panics, regardless of which
+    /// API keys are present in the environment.
+    ///
+    /// Note: whether credentials are present or absent affects the `Option`
+    /// return value, not the absence of a panic — which is what this test
+    /// actually asserts.  Behavioral coverage (returns `None` without keys)
+    /// requires an integration test that controls the env.
     #[test]
-    fn from_env_returns_none_without_api_keys() {
-        // Unset all provider keys to simulate a no-credentials environment.
-        // (They may or may not be set; we can't control the CI env here,
-        // but the important thing is from_env() doesn't panic.)
+    fn from_env_does_not_panic() {
         let result = std::panic::catch_unwind(|| LlmCodergenBackend::from_env("gpt-4o"));
         assert!(
             result.is_ok(),
@@ -188,13 +227,11 @@ mod tests {
         );
     }
 
-    /// Verify LlmCodergenBackend::new() constructs correctly with a valid client.
-    /// This is a structural test — it confirms the type exists and is constructible.
+    /// Structural compile-check: confirms `LlmCodergenBackend` exists as a type.
+    /// Cannot test `new()` directly without a real `Client` (requires API keys).
+    /// Behavioral coverage lives in `from_env_does_not_panic` and integration tests.
     #[test]
-    fn new_constructs_with_default_model() {
-        // We can't build Client::from_env() in tests without API keys,
-        // but we CAN verify the function signature exists and compiles.
-        // The meaningful behavior test is from_env_returns_none_without_api_keys.
+    fn llm_codergen_backend_type_exists() {
         let _ = std::any::TypeId::of::<LlmCodergenBackend>();
     }
 
@@ -208,16 +245,48 @@ mod tests {
         assert_is_codergen_backend::<LlmCodergenBackend>();
     }
 
-    /// Verify the model selection logic: node-level llm_model takes priority.
-    ///
-    /// This test can't call a real LLM, but it can verify the model selection
-    /// logic compiles and the struct holds the right fields.
+    /// Structural compile-check: confirms `LlmCodergenBackend` can be named as a type.
+    /// Model-selection logic (node `llm_model` vs `default_model`) is exercised
+    /// in isolation via `build_params_for_node` tests above.
     #[test]
-    fn default_model_is_stored() {
-        // Structural test — verifies the default_model field is accessible
-        // indirectly by checking the struct can be partially constructed.
+    fn llm_codergen_backend_struct_is_accessible() {
         let _ = std::any::TypeId::of::<LlmCodergenBackend>();
-        // The actual model selection logic is tested via the LLM call path
-        // in integration tests with real credentials.
+    }
+
+    #[test]
+    fn context_prefix_injected_when_human_response_present() {
+        use attractor::graph::Value;
+        let ctx = Context::new();
+        ctx.set("human.gate.response", Value::Str("option B".to_string()));
+        let prefix = build_context_prefix(&ctx);
+        assert!(
+            prefix.starts_with("[Pipeline Context]"),
+            "prefix must start with header"
+        );
+        assert!(prefix.contains("Human feedback: option B"));
+    }
+
+    #[test]
+    fn no_prefix_when_context_empty() {
+        let ctx = Context::new();
+        let prefix = build_context_prefix(&ctx);
+        assert!(prefix.is_empty(), "empty context must produce no prefix");
+    }
+
+    #[test]
+    fn all_three_keys_produce_full_prefix() {
+        use attractor::graph::Value;
+        let ctx = Context::new();
+        ctx.set("human.gate.response", Value::Str("approve".to_string()));
+        ctx.set("last_response", Value::Str("generated code".to_string()));
+        ctx.set("last_stage", Value::Str("codegen".to_string()));
+        let prefix = build_context_prefix(&ctx);
+        assert!(
+            prefix.starts_with("[Pipeline Context]"),
+            "prefix must start with header"
+        );
+        assert!(prefix.contains("Human feedback: approve"));
+        assert!(prefix.contains("Previous step output: generated code"));
+        assert!(prefix.contains("Previous step: codegen"));
     }
 }
