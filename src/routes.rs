@@ -11,6 +11,8 @@
 //! - `GET  /pipelines/{id}/checkpoint`              — latest checkpoint or null
 //! - `GET  /pipelines/{id}/context`                 — context values from latest checkpoint
 //! - `GET  /pipelines/{id}/events`                  — stream pipeline events as SSE
+//! - `GET  /pipelines/{id}/files`                   — list working directory tree as JSON
+//! - `GET  /pipelines/{id}/files/{*path}`           — read a file's contents as plain text
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,6 +56,10 @@ pub struct CreatePipelineRequest {
     pub dot: String,
     /// Initial context values injected into the pipeline.
     pub context: HashMap<String, Value>,
+    /// Optional working directory path.  When provided, the pipeline uses this
+    /// directory for file I/O instead of creating a per-pipeline temp dir.
+    /// The directory is created if it does not exist.
+    pub working_dir: Option<String>,
 }
 
 /// Successful response from `POST /pipelines`.
@@ -126,6 +132,10 @@ pub struct QuestionResponse {
     pub options: Vec<QuestionOption>,
     /// When the question was created.
     pub created_at: DateTime<Utc>,
+    /// ATR-BUG-005: Expose question metadata (includes `last_codergen_node`,
+    /// `response_md_path`, `last_response`) so the UI can resolve the correct
+    /// previous LLM node for display at human gates.
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Body for `POST /pipelines/{id}/questions/{qid}/answer`.
@@ -195,6 +205,11 @@ pub fn router() -> Router<AppState> {
             "/pipelines/{id}/nodes/{node_id}/response",
             get(get_node_response),
         )
+        .route("/pipelines/{id}/files", get(crate::files::list_files))
+        .route(
+            "/pipelines/{id}/files/{*path}",
+            get(crate::files::get_file_content),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +225,7 @@ pub async fn spawn_pipeline(
     state: &AppState,
     dot: String,
     _context: HashMap<String, Value>,
+    custom_working_dir: Option<String>,
 ) -> Result<String, ServerError> {
     // 1. Parse DOT source.
     let graph = parse_dot(&dot).map_err(|e| ServerError::ParseError(e.to_string()))?;
@@ -255,6 +271,14 @@ pub async fn spawn_pipeline(
     // Prepare logs root directory.
     let logs_root = state.logs_root_for(&pipeline_id);
     let _ = tokio::fs::create_dir_all(&logs_root).await;
+
+    // FE-004: Use custom working directory when provided, otherwise fall back
+    // to the per-pipeline default (<data_dir>/work/<pipeline_id>).
+    let working_dir = match custom_working_dir {
+        Some(ref dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => state.working_dir_for(&pipeline_id),
+    };
+    let _ = tokio::fs::create_dir_all(&working_dir).await;
 
     // 7. Spawn event relay task: forwards runner events → broadcast + event_log,
     //    and tracks current_node / completed_nodes from events.
@@ -305,8 +329,11 @@ pub async fn spawn_pipeline(
     let dot_source = dot.clone();
     let inner_exec = inner.clone();
     let logs_root_exec = logs_root.clone();
+    let working_dir_exec = working_dir.clone();
     let join_handle = tokio::spawn(async move {
-        let config = RunConfig::new(logs_root_exec);
+        // ATR-BUG-006: pass working_dir so ToolHandler shell commands run in the
+        // pipeline's working directory instead of the logs temp dir.
+        let config = RunConfig::new(logs_root_exec).with_working_dir(working_dir_exec);
         let result = runner.run(&dot_source, config).await;
         let mut lock = inner_exec.lock().await;
         // Only update if not already set by relay task.
@@ -327,6 +354,7 @@ pub async fn spawn_pipeline(
         event_tx,
         interviewer_state,
         logs_root,
+        working_dir,
         started_at: Utc::now(),
         abort_handle,
         inner,
@@ -364,7 +392,7 @@ pub async fn create_pipeline(
     State(state): State<AppState>,
     Json(req): Json<CreatePipelineRequest>,
 ) -> Result<Json<CreatePipelineResponse>, ServerError> {
-    let pipeline_id = spawn_pipeline(&state, req.dot, req.context).await?;
+    let pipeline_id = spawn_pipeline(&state, req.dot, req.context, req.working_dir).await?;
     Ok(Json(CreatePipelineResponse {
         id: pipeline_id,
         status: PipelineStatus::Running,
@@ -441,6 +469,7 @@ pub async fn get_questions(
             question_type: pq.question.question_type,
             options: pq.question.options,
             created_at: pq.created_at,
+            metadata: pq.question.metadata,
         })
         .collect();
 
@@ -1259,6 +1288,160 @@ mod tests {
             json["content"].as_str(),
             Some("The LLM responded with this text."),
             "content must be the text from response.md; got: {json}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: list_files_returns_empty_for_new_pipeline (FE-001 / FE-003)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn list_files_returns_empty_for_new_pipeline() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state);
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/files")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.is_array(), "must return a JSON array; got: {json}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: get_file_content_returns_404_for_missing_file (FE-002 / FE-003)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn get_file_content_returns_404_for_missing_file() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state);
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/files/nonexistent.md")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["code"], "FILE_NOT_FOUND");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: get_file_content_returns_file_content (FE-002 / FE-003)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn get_file_content_returns_file_content() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state.clone());
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        // Write a test file into the pipeline's working directory.
+        let working_dir = state.working_dir_for(&id);
+        std::fs::create_dir_all(&working_dir).expect("create working dir");
+        std::fs::write(working_dir.join("brainstorm.md"), "# Ideas\n\n- idea 1").unwrap();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/files/brainstorm.md")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let content = String::from_utf8_lossy(&bytes);
+        assert_eq!(content, "# Ideas\n\n- idea 1");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: list_files_returns_tree_with_file (FE-001 / FE-003)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn list_files_returns_tree_with_file() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state.clone());
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        // Write a test file into the pipeline's working directory.
+        let working_dir = state.working_dir_for(&id);
+        std::fs::create_dir_all(&working_dir).expect("create working dir");
+        std::fs::write(working_dir.join("plan.md"), "# Plan").unwrap();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/files")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "must have one file; got: {json}");
+        assert_eq!(arr[0]["name"], "plan.md");
+        assert_eq!(arr[0]["type"], "file");
+        assert!(arr[0]["size"].as_u64().is_some());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: get_file_content_rejects_path_traversal (FE-002 security)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn get_file_content_rejects_path_traversal() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state);
+
+        let create_resp = post_json(app.clone(), "/pipelines", valid_dot()).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        let resp = get_req(app, &format!("/pipelines/{id}/files/..%2F..%2Fetc%2Fpasswd")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["code"], "PATH_TRAVERSAL");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: create_pipeline_with_custom_working_dir (FE-004)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn create_pipeline_with_custom_working_dir() {
+        let state = AppState::with_temp_dir();
+        let app = router().with_state(state.clone());
+
+        let custom_dir = std::env::temp_dir().join(format!(
+            "attractor-custom-wd-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        let body = serde_json::json!({
+            "dot": "digraph test {\n  start [shape=Mdiamond]\n  exit  [shape=Msquare]\n  start -> exit\n}",
+            "context": {},
+            "working_dir": custom_dir.to_str().unwrap()
+        });
+        let create_resp = post_json(app.clone(), "/pipelines", body).await;
+        assert_eq!(create_resp.status(), StatusCode::OK);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().expect("id string").to_string();
+
+        // The custom working directory should have been created.
+        assert!(
+            custom_dir.exists(),
+            "custom working_dir must be created; path: {}",
+            custom_dir.display()
+        );
+
+        // The pipeline handle should use the custom working directory.
+        let handle = state.get_pipeline(&id).await.expect("pipeline must exist");
+        assert_eq!(
+            handle.working_dir, custom_dir,
+            "pipeline must use the custom working_dir"
         );
     }
 }

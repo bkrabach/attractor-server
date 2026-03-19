@@ -12,6 +12,7 @@
 
 pub mod backends;
 pub mod error;
+pub mod files;
 pub mod interviewer;
 pub mod routes;
 pub mod sse;

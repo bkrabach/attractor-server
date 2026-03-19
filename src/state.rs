@@ -113,6 +113,8 @@ pub struct PipelineHandle {
     // -- Filesystem --
     /// Root directory for this pipeline's log files.
     pub logs_root: PathBuf,
+    /// Working directory for this pipeline's file I/O.
+    pub working_dir: PathBuf,
 
     // -- Metadata --
     /// When the pipeline was spawned.
@@ -183,6 +185,21 @@ impl AppState {
     pub fn logs_root_for(&self, pipeline_id: &str) -> PathBuf {
         self.data_dir.join("logs").join(pipeline_id)
     }
+
+    /// Return the working directory for `pipeline_id`.
+    ///
+    /// This is `<data_dir>/work/<pipeline_id>`.  The directory is **not**
+    /// created by this method — callers should create it before use.
+    ///
+    /// ATR-BUG-006: ToolHandler shell commands (e.g. `grep READY_FOR_DESIGN
+    /// brainstorm.md`) must run relative to a per-pipeline working directory,
+    /// not the logs directory.  Without this, files written by the LLM
+    /// (brainstorm.md, design docs) end up in the working dir but tool
+    /// commands search in the logs dir, causing brainstorm loop exit checks
+    /// to always fail.
+    pub fn working_dir_for(&self, pipeline_id: &str) -> PathBuf {
+        self.data_dir.join("work").join(pipeline_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +224,7 @@ mod tests {
         })
         .abort_handle();
 
+        let working_dir = app_state.working_dir_for(id);
         Arc::new(PipelineHandle {
             id: id.to_string(),
             dot_source: "digraph {}".to_string(),
@@ -214,6 +232,7 @@ mod tests {
             event_tx,
             interviewer_state,
             logs_root,
+            working_dir,
             started_at: Utc::now(),
             abort_handle,
             inner: Arc::new(Mutex::new(PipelineInner::new())),
@@ -359,6 +378,39 @@ mod tests {
             matches!(first, PipelineEvent::PipelineStarted { id, .. } if id == "old"),
             "first remaining entry must be 'old' (oldest of the old batch); got: {:?}",
             first
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 8: pipeline_handle_stores_working_dir (FE-001)
+    // ---------------------------------------------------------------------------
+    #[tokio::test]
+    async fn pipeline_handle_stores_working_dir() {
+        let state = AppState::with_temp_dir();
+        let handle = make_handle("pipe-wd", &state);
+        let expected = state.working_dir_for("pipe-wd");
+        assert_eq!(handle.working_dir, expected);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test 9: working_dir_for_pipeline (ATR-BUG-006)
+    //
+    // Verify that working_dir_for() returns <data_dir>/work/<pipeline_id>,
+    // distinct from the logs root path.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn working_dir_for_pipeline() {
+        let data_dir = std::path::PathBuf::from("/tmp/test-data");
+        let state = AppState::new(data_dir.clone());
+
+        let working_dir = state.working_dir_for("pipe-xyz");
+        assert_eq!(working_dir, data_dir.join("work").join("pipe-xyz"));
+
+        // Must differ from logs root.
+        let logs_root = state.logs_root_for("pipe-xyz");
+        assert_ne!(
+            working_dir, logs_root,
+            "working_dir must be distinct from logs_root"
         );
     }
 }

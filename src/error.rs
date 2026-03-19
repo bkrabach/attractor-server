@@ -71,6 +71,18 @@ pub enum ServerError {
     #[error("graphviz not available")]
     GraphvizNotAvailable,
 
+    /// A file was not found in the pipeline's working directory. → 404
+    #[error("file not found: {0}")]
+    FileNotFound(String),
+
+    /// A file path attempted directory traversal (contains `..`). → 400
+    #[error("path traversal not allowed")]
+    PathTraversal,
+
+    /// A file exceeds the maximum displayable size. → 400
+    #[error("file too large: {0} bytes")]
+    FileTooLarge(u64),
+
     /// An unexpected internal server error. → 500
     #[error("internal error: {0}")]
     Internal(String),
@@ -80,8 +92,8 @@ impl ServerError {
     /// HTTP status code for this error variant.
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::PipelineNotFound(_) | Self::QuestionNotFound(_) => StatusCode::NOT_FOUND,
-            Self::ParseError(_) | Self::InvalidAnswer(_) => StatusCode::BAD_REQUEST,
+            Self::PipelineNotFound(_) | Self::QuestionNotFound(_) | Self::FileNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ParseError(_) | Self::InvalidAnswer(_) | Self::PathTraversal | Self::FileTooLarge(_) => StatusCode::BAD_REQUEST,
             Self::ValidationError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::PipelineNotRunning(_) | Self::QuestionAlreadyAnswered(_) => StatusCode::CONFLICT,
             Self::GraphvizNotAvailable => StatusCode::NOT_IMPLEMENTED,
@@ -99,6 +111,9 @@ impl ServerError {
             Self::PipelineNotRunning(_) => "PIPELINE_NOT_RUNNING",
             Self::QuestionAlreadyAnswered(_) => "QUESTION_ALREADY_ANSWERED",
             Self::InvalidAnswer(_) => "INVALID_ANSWER",
+            Self::FileNotFound(_) => "FILE_NOT_FOUND",
+            Self::PathTraversal => "PATH_TRAVERSAL",
+            Self::FileTooLarge(_) => "FILE_TOO_LARGE",
             Self::GraphvizNotAvailable => "GRAPHVIZ_NOT_AVAILABLE",
             Self::Internal(_) => "INTERNAL_ERROR",
         }
@@ -218,6 +233,27 @@ mod tests {
         let json = body_json(ServerError::Internal("db connection refused".into())).await;
         assert_eq!(json["error"]["code"], "INTERNAL_ERROR");
         assert_eq!(json["error"]["status"], 500);
+    }
+
+    #[tokio::test]
+    async fn file_not_found_produces_404_json() {
+        let json = body_json(ServerError::FileNotFound("docs/plan.md".into())).await;
+        assert_eq!(json["error"]["code"], "FILE_NOT_FOUND");
+        assert_eq!(json["error"]["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn path_traversal_produces_400_json() {
+        let json = body_json(ServerError::PathTraversal).await;
+        assert_eq!(json["error"]["code"], "PATH_TRAVERSAL");
+        assert_eq!(json["error"]["status"], 400);
+    }
+
+    #[tokio::test]
+    async fn file_too_large_produces_400_json() {
+        let json = body_json(ServerError::FileTooLarge(2_000_000)).await;
+        assert_eq!(json["error"]["code"], "FILE_TOO_LARGE");
+        assert_eq!(json["error"]["status"], 400);
     }
 
     #[tokio::test]
