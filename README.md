@@ -2,8 +2,7 @@
 
 HTTP server for the [attractor](https://github.com/bkrabach/attractor) DOT-based AI pipeline runner.
 
-[![crates.io](https://img.shields.io/crates/v/attractor-server.svg)](https://crates.io/crates/attractor-server)
-[![docs.rs](https://docs.rs/attractor-server/badge.svg)](https://docs.rs/attractor-server)
+[![CI](https://github.com/bkrabach/attractor-server/actions/workflows/ci.yaml/badge.svg)](https://github.com/bkrabach/attractor-server/actions)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Overview
