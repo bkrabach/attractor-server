@@ -168,10 +168,12 @@ impl CodergenBackend for LlmCodergenBackend {
         //    subagent resources in a long-running server process.
         if submit_result.is_err() {
             session.shutdown().await;
-            return submit_result.map_err(|e| EngineError::Handler {
-                node_id: node.id.clone(),
-                message: format!("agent session failed: {e}"),
-            }).map(|()| CodergenResult::Text(String::new()));
+            return submit_result
+                .map_err(|e| EngineError::Handler {
+                    node_id: node.id.clone(),
+                    message: format!("agent session failed: {e}"),
+                })
+                .map(|()| CodergenResult::Text(String::new()));
         }
 
         // 8. Extract the last non-empty assistant text from the session history.
@@ -349,8 +351,7 @@ mod tests {
         node.reasoning_effort = "high".to_string();
 
         // The run() logic: if !node.reasoning_effort.is_empty() && node.reasoning_effort != "high"
-        let should_forward =
-            !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
+        let should_forward = !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
         assert!(!should_forward, "\"high\" must not be forwarded to config");
     }
 
@@ -360,8 +361,7 @@ mod tests {
         let mut node = Node::default();
         node.reasoning_effort = "low".to_string();
 
-        let should_forward =
-            !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
+        let should_forward = !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
         assert!(should_forward, "\"low\" must be forwarded to config");
     }
 
@@ -370,8 +370,7 @@ mod tests {
     fn reasoning_effort_empty_not_forwarded() {
         let node = Node::default();
 
-        let should_forward =
-            !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
+        let should_forward = !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
         assert!(!should_forward, "empty must not be forwarded to config");
     }
 }

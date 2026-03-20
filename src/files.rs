@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use axum::extract::{Path as AxumPath, State};
 use axum::Json;
+use axum::extract::{Path as AxumPath, State};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -58,9 +58,7 @@ fn build_tree(dir: &Path, base: &Path) -> std::io::Result<Vec<FileNode>> {
         return Ok(entries);
     }
 
-    let mut dir_entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut dir_entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
     dir_entries.sort_by_key(|e| e.file_name());
 
     for entry in dir_entries {
@@ -73,9 +71,10 @@ fn build_tree(dir: &Path, base: &Path) -> std::io::Result<Vec<FileNode>> {
             .to_string_lossy()
             .to_string();
 
-        let modified_at = metadata.modified().ok().map(|t| {
-            DateTime::<Utc>::from(t).to_rfc3339()
-        });
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .map(|t| DateTime::<Utc>::from(t).to_rfc3339());
 
         if metadata.is_dir() {
             let children = build_tree(&entry.path(), base)?;

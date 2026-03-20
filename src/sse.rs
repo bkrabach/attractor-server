@@ -136,6 +136,7 @@ mod tests {
                 index: 0,
                 duration: Duration::from_secs(1),
                 success: true,
+                error: None,
             },
             PipelineEvent::ParallelCompleted {
                 duration: Duration::from_secs(1),
@@ -227,6 +228,7 @@ mod tests {
                 index: 0,
                 duration: Duration::from_secs(1),
                 success: true,
+                error: None,
             },
             PipelineEvent::ParallelCompleted {
                 duration: Duration::from_secs(1),

@@ -147,7 +147,8 @@ pub async fn preload_pipeline_from_file(
             file_path.display()
         ))
     })?;
-    attractor_server::routes::spawn_pipeline(state, dot, std::collections::HashMap::new(), None).await
+    attractor_server::routes::spawn_pipeline(state, dot, std::collections::HashMap::new(), None)
+        .await
 }
 
 // ---------------------------------------------------------------------------

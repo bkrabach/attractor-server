@@ -92,8 +92,13 @@ impl ServerError {
     /// HTTP status code for this error variant.
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::PipelineNotFound(_) | Self::QuestionNotFound(_) | Self::FileNotFound(_) => StatusCode::NOT_FOUND,
-            Self::ParseError(_) | Self::InvalidAnswer(_) | Self::PathTraversal | Self::FileTooLarge(_) => StatusCode::BAD_REQUEST,
+            Self::PipelineNotFound(_) | Self::QuestionNotFound(_) | Self::FileNotFound(_) => {
+                StatusCode::NOT_FOUND
+            }
+            Self::ParseError(_)
+            | Self::InvalidAnswer(_)
+            | Self::PathTraversal
+            | Self::FileTooLarge(_) => StatusCode::BAD_REQUEST,
             Self::ValidationError(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::PipelineNotRunning(_) | Self::QuestionAlreadyAnswered(_) => StatusCode::CONFLICT,
             Self::GraphvizNotAvailable => StatusCode::NOT_IMPLEMENTED,

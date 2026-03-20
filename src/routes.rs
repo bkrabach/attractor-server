@@ -1401,7 +1401,11 @@ mod tests {
         let create_json = body_json(create_resp).await;
         let id = create_json["id"].as_str().expect("id string").to_string();
 
-        let resp = get_req(app, &format!("/pipelines/{id}/files/..%2F..%2Fetc%2Fpasswd")).await;
+        let resp = get_req(
+            app,
+            &format!("/pipelines/{id}/files/..%2F..%2Fetc%2Fpasswd"),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp).await;
         assert_eq!(json["error"]["code"], "PATH_TRAVERSAL");
@@ -1415,10 +1419,8 @@ mod tests {
         let state = AppState::with_temp_dir();
         let app = router().with_state(state.clone());
 
-        let custom_dir = std::env::temp_dir().join(format!(
-            "attractor-custom-wd-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let custom_dir =
+            std::env::temp_dir().join(format!("attractor-custom-wd-{}", uuid::Uuid::new_v4()));
 
         let body = serde_json::json!({
             "dot": "digraph test {\n  start [shape=Mdiamond]\n  exit  [shape=Msquare]\n  start -> exit\n}",
