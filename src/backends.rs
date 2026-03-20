@@ -276,8 +276,10 @@ mod tests {
 
     #[test]
     fn node_llm_model_overrides_default() {
-        let mut node = Node::default();
-        node.llm_model = "claude-opus-4-6".to_string();
+        let node = Node {
+            llm_model: "claude-opus-4-6".to_string(),
+            ..Default::default()
+        };
 
         let model = resolve_model(&node, "gpt-4o");
         let provider = resolve_provider(&node, &model);
@@ -300,9 +302,11 @@ mod tests {
     /// infer_provider would guess wrong.
     #[test]
     fn node_llm_provider_overrides_inference() {
-        let mut node = Node::default();
-        node.llm_model = "my-custom-model".to_string();
-        node.llm_provider = "anthropic".to_string();
+        let node = Node {
+            llm_model: "my-custom-model".to_string(),
+            llm_provider: "anthropic".to_string(),
+            ..Default::default()
+        };
 
         let model = resolve_model(&node, "gpt-4o");
         let provider = resolve_provider(&node, &model);
@@ -315,8 +319,10 @@ mod tests {
 
     #[test]
     fn empty_llm_provider_falls_back_to_inference() {
-        let mut node = Node::default();
-        node.llm_model = "gemini-2.5-pro".to_string();
+        let node = Node {
+            llm_model: "gemini-2.5-pro".to_string(),
+            ..Default::default()
+        };
         // llm_provider intentionally left empty
 
         let model = resolve_model(&node, "gpt-4o");
@@ -347,8 +353,10 @@ mod tests {
     /// Reasoning effort: "high" (parser default) should NOT be forwarded.
     #[test]
     fn reasoning_effort_high_not_forwarded() {
-        let mut node = Node::default();
-        node.reasoning_effort = "high".to_string();
+        let node = Node {
+            reasoning_effort: "high".to_string(),
+            ..Default::default()
+        };
 
         // The run() logic: if !node.reasoning_effort.is_empty() && node.reasoning_effort != "high"
         let should_forward = !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
@@ -358,8 +366,10 @@ mod tests {
     /// Reasoning effort: "low" should be forwarded.
     #[test]
     fn reasoning_effort_low_forwarded() {
-        let mut node = Node::default();
-        node.reasoning_effort = "low".to_string();
+        let node = Node {
+            reasoning_effort: "low".to_string(),
+            ..Default::default()
+        };
 
         let should_forward = !node.reasoning_effort.is_empty() && node.reasoning_effort != "high";
         assert!(should_forward, "\"low\" must be forwarded to config");
